@@ -4,7 +4,7 @@
 
 Gauguin is a high-performance bridge for single-cell data analysis. It enables the seamless transfer of genomic landscapes from Python's AnnData (H5AD) objects to R's Seurat ecosystem, ensuring your workflow remains uninterrupted across different programming environments.
 
-##Key Features
+## Key Features
 - Zero-Friction Integration: Effortlessly convert .h5ad files into native Seurat objects.
 
 - Minimal Dependency: Designed to be lightweight. You don't need a bloated environment; as long as Seurat is present, Gauguin handles the rest.
