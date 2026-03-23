@@ -20,7 +20,7 @@ Read H5AD AnnData Object,and convert to Seurat Object
 \examples{
 \dontrun{
 
-h5ad_file <- system.file("extdata", "sce.h5ad", package = "Gauguin")
+h5ad_file = system.file("extdata", "sce.h5ad", package = "Gauguin")
 ReadH5AD(h5ad_file, env_path = "path/to/your/python/env")
 }
 }
