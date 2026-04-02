@@ -93,17 +93,18 @@ ReadH5AD = function(h5ad_path, env_path) {
   n_vars_r = as.integer(py_to_r(adata$n_vars))
   sample_X = py_to_r(adata$X[0:min(100, n_obs_r-1), 0:min(100, n_vars_r-1)])
 
-  # 判断标准：是否存在明显的负值
+
   is_scaled = any(as.numeric(sample_X) < -0.0001)
   if ("scaled" %in% layers_list) {
-    scaled_mtx = t(py_to_r(adata$layers["scaled"]))
+    scaled_mtx = Matrix::t(py_to_r(adata$layers["scaled"]))
     rownames(scaled_mtx) = as.character(py_to_r(adata$var_names$to_list()))
     colnames(scaled_mtx) = obs_names
     seurat_obj = SetAssayData(seurat_obj, slot = "scale.data", new.data = as.matrix(scaled_mtx))
   } else if(is_scaled){
     message("adata.X might be scaled, please consider use adata.X as layer `scale.data`")
+    scaled_mtx = Matrix::t(py_to_r(adata$X))
   }else{
-    message("No scaled.data be yieled in anndata object")
+    message("No scaled.data be yieled in anndata object,nor any scaled matrix be generated")
   }
 
   obsm_dict = py_call(adata$obsm$as_dict)
