@@ -11,7 +11,7 @@
 #' h5ad_file = system.file("extdata", "sce.h5ad", package = "Gauguin")
 #' ReadH5AD(h5ad_file, env_path = "path/to/your/python/env")
 #' }
-#' @importFrom reticulate use_python import py_to_r py_is_null_xptr py_call
+#' @importFrom reticulate use_python import py_to_r py_is_null_xptr py_call import_builtins
 #' @importFrom Seurat CreateSeuratObject SetAssayData CreateDimReducObject
 #' @importFrom methods as
 #' @importFrom Matrix t
@@ -27,7 +27,8 @@ ReadH5AD = function(h5ad_path, env_path) {
 
   obs_names = as.character(py_to_r(adata$obs_names$to_list()))
   var_names = as.character(py_to_r(adata$var_names$to_list()))
-  layers_list = names(py_to_r(adata$layers))
+  builtins <- import_builtins()
+  layers_list <- as.character(py_to_r(builtins$list(adata$layers$keys())))
 
   if ("counts" %in% layers_list) {
     message("Using counts layer...")
@@ -88,11 +89,22 @@ ReadH5AD = function(h5ad_path, env_path) {
 
   }
 
+  n_obs_r = as.integer(py_to_r(adata$n_obs))
+  n_vars_r = as.integer(py_to_r(adata$n_vars))
+  sample_X = py_to_r(adata$X[0:min(100, n_obs_r-1), 0:min(100, n_vars_r-1)])
+
+
+  is_scaled = any(as.numeric(sample_X) < -0.0001)
   if ("scaled" %in% layers_list) {
-    scaled_mtx = t(py_to_r(adata$layers["scaled"]))
+    scaled_mtx = Matrix::t(py_to_r(adata$layers["scaled"]))
     rownames(scaled_mtx) = as.character(py_to_r(adata$var_names$to_list()))
     colnames(scaled_mtx) = obs_names
     seurat_obj = SetAssayData(seurat_obj, slot = "scale.data", new.data = as.matrix(scaled_mtx))
+  } else if(is_scaled){
+    message("adata.X might be scaled, please consider use adata.X as layer `scale.data`")
+    scaled_mtx = Matrix::t(py_to_r(adata$X))
+  }else{
+    message("No scaled.data be yieled in anndata object,nor any scaled matrix be generated")
   }
 
   obsm_dict = py_call(adata$obsm$as_dict)

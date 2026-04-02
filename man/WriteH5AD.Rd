@@ -23,4 +23,10 @@ Write Seurat object into h5ad AnnData object format
 }
 \details{
 Warn: To keep the integrity and reproducibility, the `WriteH5AD` func will use counts layer as adata.X.
+#' @examples
+\dontrun{
+
+  sce <- readRDS(system.file("extdata", "sce.rds", package = "Gauguin"))
+  WriteH5AD(sce,"path/to/your/python/env,"sce2.h5ad")
+}
 }
