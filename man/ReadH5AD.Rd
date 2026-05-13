@@ -15,7 +15,9 @@ ReadH5AD(h5ad_path, env_path)
 seurat_obj A Seurat Object
 }
 \description{
-Read H5AD AnnData Object,and convert to Seurat Object
+Read H5AD AnnData Object, and convert to Seurat Object.
+Supports spatial data (Visium) by automatically detecting \code{obsm["spatial"]}
+and \code{uns["spatial"]} and constructing a VisiumV1 image object.
 }
 \examples{
 \dontrun{
