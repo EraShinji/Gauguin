@@ -1,6 +1,8 @@
 #' ReadH5AD
 #' @description
-#' Read H5AD AnnData Object,and convert to Seurat Object
+#' Read H5AD AnnData Object, and convert to Seurat Object.
+#' Supports spatial data (Visium) by automatically detecting \code{obsm["spatial"]}
+#' and \code{uns["spatial"]} and constructing a VisiumV1 image object.
 #'
 #' @param h5ad_path A path which stores H5AD file.
 #' @param env_path A path used to execute python environment.
@@ -13,7 +15,7 @@
 #' }
 #' @importFrom reticulate use_python import py_to_r py_is_null_xptr py_call import_builtins
 #' @importFrom Seurat CreateSeuratObject SetAssayData CreateDimReducObject
-#' @importFrom methods as
+#' @importFrom methods as new
 #' @importFrom Matrix t
 #' @export
 ReadH5AD = function(h5ad_path, env_path) {
@@ -110,8 +112,9 @@ ReadH5AD = function(h5ad_path, env_path) {
   obsm_dict = py_call(adata$obsm$as_dict)
 
   for (key in names(obsm_dict)) {
+    if (key == "spatial") next
     embedding = obsm_dict[[key]]
-    embedding= py_to_r(embedding)
+    embedding = py_to_r(embedding)
     rownames(embedding) = colnames(seurat_obj)
     colnames(embedding) = paste0(key, "_", 1:ncol(embedding))
     fixed_key = gsub("^X_", "", key)
@@ -119,5 +122,114 @@ ReadH5AD = function(h5ad_path, env_path) {
     seurat_obj[[fixed_key]] = CreateDimReducObject(embeddings = embedding,
                                                     key = fixed_key, assay = "RNA")
   }
-  return(seurat_obj)
+
+  # --- Spatial data migration ---
+  has_spatial_obsm = "spatial" %in% names(obsm_dict)
+  uns_dict = tryCatch(py_to_r(py_call(adata$uns$as_dict)), error = function(e) list())
+  has_spatial_uns = "spatial" %in% names(uns_dict)
+
+  if (has_spatial_obsm) {
+    message("Detected spatial data in obsm['spatial'], migrating...")
+
+    spatial_coords = py_to_r(obsm_dict[["spatial"]])
+    rownames(spatial_coords) = obs_names
+
+    # Build coordinates data.frame
+    # AnnData spatial coords: column 1 = imagerow (pxl_row), column 2 = imagecol (pxl_col)
+    coordinates = data.frame(
+      imagerow = spatial_coords[, 1],
+      imagecol = spatial_coords[, 2],
+      row.names = obs_names
+    )
+
+    # Add tissue, array_row, array_col from obs if available
+    obs_df = py_to_r(adata$obs)
+    if ("in_tissue" %in% colnames(obs_df)) {
+      coordinates$tissue = as.integer(obs_df[["in_tissue"]])
+    } else {
+      coordinates$tissue = 1L
+    }
+    if ("array_row" %in% colnames(obs_df)) {
+      coordinates$row = as.integer(obs_df[["array_row"]])
+    } else {
+      coordinates$row = seq_len(nrow(coordinates))
+    }
+    if ("array_col" %in% colnames(obs_df)) {
+      coordinates$col = as.integer(obs_df[["array_col"]])
+    } else {
+      coordinates$col = seq_len(nrow(coordinates))
+    }
+
+    # Reorder columns to match Seurat convention
+    coordinates = coordinates[, c("tissue", "row", "col", "imagerow", "imagecol")]
+
+    # Extract image and scale factors from uns["spatial"] if available
+    spatial_image = array(0, dim = c(1, 1, 3))
+    sf_spot = 1
+    sf_fiducial = 1
+    sf_hires = 1
+    sf_lowres = 1
+
+    if (has_spatial_uns) {
+      spatial_uns = uns_dict[["spatial"]]
+      library_id = names(spatial_uns)[1]
+
+      if (!is.null(library_id)) {
+        lib_data = spatial_uns[[library_id]]
+
+        # Extract images
+        if ("images" %in% names(lib_data)) {
+          images_data = lib_data[["images"]]
+          if ("hires" %in% names(images_data)) {
+            spatial_image = images_data[["hires"]]
+            message("  Loaded hires image from uns['spatial']")
+          } else if ("lowres" %in% names(images_data)) {
+            spatial_image = images_data[["lowres"]]
+            message("  Loaded lowres image from uns['spatial']")
+          }
+          # Ensure image is a 3D array
+          if (!is.array(spatial_image)) {
+            spatial_image = as.array(spatial_image)
+          }
+        }
+
+        # Extract scale factors
+        if ("scalefactors" %in% names(lib_data)) {
+          sf_data = lib_data[["scalefactors"]]
+          if ("spot_diameter_fullres" %in% names(sf_data))
+            sf_spot = as.numeric(sf_data[["spot_diameter_fullres"]])
+          if ("fiducial_diameter_fullres" %in% names(sf_data))
+            sf_fiducial = as.numeric(sf_data[["fiducial_diameter_fullres"]])
+          if ("tissue_hires_scalef" %in% names(sf_data))
+            sf_hires = as.numeric(sf_data[["tissue_hires_scalef"]])
+          if ("tissue_lowres_scalef" %in% names(sf_data))
+            sf_lowres = as.numeric(sf_data[["tissue_lowres_scalef"]])
+          message("  Loaded scale factors from uns['spatial']")
+        }
+      }
+    }
+
+    # Create scalefactors object
+    scale_factors = structure(
+      list(spot = sf_spot, fiducial = sf_fiducial, hires = sf_hires, lowres = sf_lowres),
+      class = "scalefactors"
+    )
+
+    # Create VisiumV1 object
+    visium_image = new(
+      Class = "VisiumV1",
+      assay = "RNA",
+      key = "slice1_",
+      image = spatial_image,
+      scale.factors = scale_factors,
+      coordinates = coordinates,
+      spot.radius = sf_spot / 2
+    )
+
+    # Attach image to Seurat object
+    seurat_obj[["slice1"]] = visium_image
+    message("Spatial data successfully attached as VisiumV1 image 'slice1'")
   }
+
+  return(seurat_obj)
+}

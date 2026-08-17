@@ -1,11 +1,12 @@
 Package: Gauguin
 Type: Package
 Title: Generalized Anndata Utility for Guaranteed Uninterrupted Integration into Native-Seurat
-Version: 0.1.3
+Version: 0.2.0
 Authors@R: person("aleclanned", email = "aleclanned@outlook.com", role = c("aut", "cre"))
-Description: A high-performance bridge for single-cell data analysis, enabling the seamless 
-    transfer of genomic landscapes from Python's AnnData (H5AD) objects to R's Seurat 
-    ecosystem while preserving counts, normalized layers, and dimensional embeddings.
+Description: A high-performance bridge for single-cell data analysis, enabling the seamless
+    transfer of genomic landscapes from Python's AnnData (H5AD) objects to R's Seurat
+    ecosystem while preserving counts, normalized layers, dimensional embeddings, and
+    spatial transcriptomics data (Visium coordinates, tissue images, and scale factors).
 License: GPL (>= 3)
 Encoding: UTF-8
 LazyData: true
