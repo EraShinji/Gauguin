@@ -11,7 +11,7 @@ WriteH5AD_Spatial(
   assay = "Spatial",
   image_name = NULL,
   library_id = "library1",
-  image_resolution = "hires",
+  image_resolution = "lowres",
   hires_image_path = NULL
 )
 }
@@ -29,12 +29,15 @@ the first available image is used.}
 
 \item{library_id}{The library ID to use in \code{uns["spatial"]}. Default "library1".}
 
-\item{image_resolution}{Which image resolution to write: "hires", "lowres", or "both". Default "hires".}
+\item{image_resolution}{Which image resolution to write: "hires", "lowres", or "both". Default "lowres",
+matching the image normally stored in a Seurat Visium object.}
 
 \item{hires_image_path}{Optional path (character) to an external hires tissue
 image PNG file (e.g. Space Ranger's \code{tissue_hires_image.png}).
 Default \code{NULL}. Behaviour:
 \itemize{
+  \item If supplied while \code{image_resolution} is omitted, both hires
+    and the in-object lowres image are written when available.
   \item If \code{NULL}: the hires image is taken from the Seurat object's
     \code{@image} slot when that slot contains a hires-sized image
     (detected by dimension; typically >=1500 px on the long edge).
@@ -55,7 +58,8 @@ coordinates, tissue images, and scale factors.
 Supports Seurat objects with VisiumV1 or VisiumV2 image objects.
 Spatial data is written to standard AnnData locations:
 \itemize{
-  \item \code{obsm["spatial"]}: Tissue coordinates (imagerow, imagecol)
+  \item \code{obsm["spatial"]}: Tissue coordinates (imagecol, imagerow),
+    following the Scanpy convention of (x, y)
   \item \code{uns["spatial"][library_id]["images"]}: H&E image as numpy array
   \item \code{uns["spatial"][library_id]["scalefactors"]}: Scale factor dictionary
   \item \code{obs}: Includes in_tissue, array_row, array_col columns

@@ -11,8 +11,6 @@ brain <- tryCatch(
   error = function(e) NULL
 )
 
-env_path <- "C:/Users/aleclanned/.local/share/mamba/envs/Single.Cell.Analysis"
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -26,30 +24,29 @@ test_that("WriteH5AD_Spatial writes a valid h5ad file for stxBrain VisiumV1", {
   expect_no_error(
     WriteH5AD_Spatial(
       seurat_object   = brain,
-      env_path        = env_path,
       output_path     = out_path,
       assay           = "Spatial",
       library_id      = "anterior1",
-      image_resolution = "hires"
+      image_resolution = "lowres"
     )
   )
   expect_true(file.exists(out_path))
   expect_gt(file.size(out_path), 0)
 })
 
-test_that("WriteH5AD_Spatial writes both hires and lowres images", {
+test_that("WriteH5AD_Spatial preserves lowres when both resolutions are requested", {
   skip_on_cran()
   skip_if(is.null(brain), "stxBrain dataset not available")
   out_path <- tempfile(fileext = ".h5ad")
   on.exit(unlink(out_path), add = TRUE)
 
-  expect_no_error(
+  expect_warning(
     WriteH5AD_Spatial(
       seurat_object    = brain,
-      env_path         = env_path,
       output_path      = out_path,
       image_resolution = "both"
-    )
+    ),
+    "no hires image is available"
   )
   expect_true(file.exists(out_path))
 })
@@ -63,7 +60,6 @@ test_that("WriteH5AD_Spatial falls back when specified assay is missing", {
   expect_message(
     WriteH5AD_Spatial(
       seurat_object = brain,
-      env_path      = env_path,
       output_path   = out_path,
       assay         = "NonExistentAssay"
     ),
@@ -81,7 +77,6 @@ test_that("WriteH5AD_Spatial errors on invalid image_name", {
   expect_error(
     WriteH5AD_Spatial(
       seurat_object = brain,
-      env_path      = env_path,
       output_path   = out_path,
       image_name    = "nonexistent_slice"
     ),
@@ -104,7 +99,6 @@ test_that("WriteH5AD_Spatial warns and writes non-spatial h5ad for plain object"
   expect_warning(
     WriteH5AD_Spatial(
       seurat_object = plain_obj,
-      env_path      = env_path,
       output_path   = out_path
     ),
     "No spatial images"
@@ -120,13 +114,11 @@ test_that("WriteH5AD_Spatial output roundtrips correctly via anndata", {
 
   WriteH5AD_Spatial(
     seurat_object = brain,
-    env_path      = env_path,
     output_path   = out_path,
     library_id    = "anterior1"
   )
 
-  reticulate::use_python(env_path, required = TRUE)
-  anndata <- reticulate::import("anndata", delay_load = FALSE)
+  anndata <- reticulate::import("anndata", delay_load = FALSE, convert = FALSE)
   adata   <- anndata$read_h5ad(out_path)
 
   n_cells <- ncol(Seurat::GetAssayData(brain, assay = "Spatial", layer = "counts"))
@@ -134,18 +126,21 @@ test_that("WriteH5AD_Spatial output roundtrips correctly via anndata", {
 
   # Dimensions
 
-  expect_equal(adata$n_obs, n_cells)
-  expect_equal(adata$n_vars, n_genes)
+  expect_equal(as.integer(reticulate::py_to_r(adata$n_obs)), n_cells)
+  expect_equal(as.integer(reticulate::py_to_r(adata$n_vars)), n_genes)
 
   # Spatial coordinates written to obsm
-  expect_true("spatial" %in% names(adata$obsm))
-  spatial_mat <- reticulate::py_to_r(adata$obsm["spatial"])
+  builtins <- reticulate::import_builtins(convert = FALSE)
+  obsm_keys <- as.character(reticulate::py_to_r(builtins$list(adata$obsm$keys())))
+  expect_true("spatial" %in% obsm_keys)
+  spatial_mat <- reticulate::py_to_r(adata$obsm[["spatial"]])
   expect_equal(nrow(spatial_mat), n_cells)
   expect_equal(ncol(spatial_mat), 2L)
 
   # uns["spatial"] structure
-  expect_true("spatial" %in% names(adata$uns))
-  spatial_uns <- reticulate::py_to_r(adata$uns["spatial"])
+  uns <- reticulate::py_to_r(adata$uns)
+  expect_true("spatial" %in% names(uns))
+  spatial_uns <- uns[["spatial"]]
   expect_true("anterior1" %in% names(spatial_uns))
   expect_true("images"       %in% names(spatial_uns[["anterior1"]]))
   expect_true("scalefactors" %in% names(spatial_uns[["anterior1"]]))
