@@ -7,7 +7,8 @@
 #' Supports Seurat objects with VisiumV1 or VisiumV2 image objects.
 #' Spatial data is written to standard AnnData locations:
 #' \itemize{
-#'   \item \code{obsm["spatial"]}: Tissue coordinates (imagerow, imagecol)
+#'   \item \code{obsm["spatial"]}: Tissue coordinates (imagecol, imagerow),
+#'     following the Scanpy convention of (x, y)
 #'   \item \code{uns["spatial"][library_id]["images"]}: H&E image as numpy array
 #'   \item \code{uns["spatial"][library_id]["scalefactors"]}: Scale factor dictionary
 #'   \item \code{obs}: Includes in_tissue, array_row, array_col columns
@@ -20,11 +21,14 @@
 #' @param image_name The name of the image/slice in the Seurat object. If NULL,
 #'   the first available image is used.
 #' @param library_id The library ID to use in \code{uns["spatial"]}. Default "library1".
-#' @param image_resolution Which image resolution to write: "hires", "lowres", or "both". Default "hires".
+#' @param image_resolution Which image resolution to write: "hires", "lowres", or "both". Default "lowres",
+#'   matching the image normally stored in a Seurat Visium object.
 #' @param hires_image_path Optional path (character) to an external hires tissue
 #'   image PNG file (e.g. Space Ranger's \code{tissue_hires_image.png}).
 #'   Default \code{NULL}. Behaviour:
 #'   \itemize{
+#'     \item If supplied while \code{image_resolution} is omitted, both hires
+#'       and the in-object lowres image are written when available.
 #'     \item If \code{NULL}: the hires image is taken from the Seurat object's
 #'       \code{@image} slot when that slot contains a hires-sized image
 #'       (detected by dimension; typically >=1500 px on the long edge).
@@ -52,15 +56,23 @@
 WriteH5AD_Spatial = function(seurat_object, env_path, output_path,
                               assay = "Spatial", image_name = NULL,
                               library_id = "library1",
-                              image_resolution = "hires",
+                              image_resolution = "lowres",
                               hires_image_path = NULL) {
 
   if (!missing(env_path)) {
     use_python(env_path, required = TRUE)
   }
 
+  if (!is.null(hires_image_path) && missing(image_resolution)) {
+    image_resolution = "both"
+  }
+
   if (!(image_resolution %in% c("hires", "lowres", "both"))) {
     stop("image_resolution must be one of 'hires', 'lowres', 'both'.")
+  }
+  if (!is.character(library_id) || length(library_id) != 1 ||
+      is.na(library_id) || !nzchar(library_id)) {
+    stop("library_id must be a single non-empty string.")
   }
 
   load_image_file = function(path) {
@@ -112,10 +124,10 @@ WriteH5AD_Spatial = function(seurat_object, env_path, output_path,
   reticulate::py_run_string("
 def _gauguin_set_spatial(adata, coords, library_id,
                          hires_img=None, lowres_img=None,
-                         scalefactors=None):
+                         scalefactors=None, source_image_path=''):
     import numpy as _np
     adata.obsm['spatial'] = _np.asarray(coords)
-    lib = {'metadata': {'source_image_path': ''}}
+    lib = {'metadata': {'source_image_path': str(source_image_path)}}
     images = {}
     if hires_img is not None:
         images['hires'] = _np.asarray(hires_img)
@@ -137,11 +149,12 @@ def _gauguin_set_obsm(adata, key, value):
   # Detect available assay: try user-specified, fallback to common spatial assay names
   available_assays = names(seurat_object@assays)
   if (!(assay %in% available_assays)) {
+    requested_assay = assay
     spatial_candidates = c("Spatial", "SCT", "RNA")
     matched = spatial_candidates[spatial_candidates %in% available_assays]
     if (length(matched) > 0) {
       assay = matched[1]
-      message("Assay '", assay, "' not found, using '", assay, "' instead.")
+      message("Assay '", requested_assay, "' not found, using '", assay, "' instead.")
     } else {
       assay = available_assays[1]
       message("Using first available assay: '", assay, "'")
@@ -161,21 +174,48 @@ def _gauguin_set_obsm(adata, key, value):
 
   # Metadata
   meta_data = seurat_object@meta.data
-  meta_data$barcode = rownames(meta_data)
+  if (is.null(rownames(meta_data)) || !all(cell_names %in% rownames(meta_data))) {
+    stop("Seurat metadata row names do not contain all assay cell barcodes.")
+  }
+  meta_data = meta_data[cell_names, , drop = FALSE]
+  meta_data$barcode = cell_names
+
+  create_anndata = function(counts, metadata, cells) {
+    metadata = metadata[cells, , drop = FALSE]
+    adata = anndata$AnnData(X = counts, obs = pd$DataFrame(metadata))
+    adata$obs_names = np$array(cells)
+    adata$var_names = np$array(gene_names)
+    adata
+  }
+
+  write_reductions = function(adata, cells) {
+    if (length(seurat_object@reductions) == 0) return(invisible(NULL))
+
+    for (reduction_name in names(seurat_object@reductions)) {
+      embeddings = Embeddings(seurat_object, reduction = reduction_name)
+      if (is.null(rownames(embeddings)) || !all(cells %in% rownames(embeddings))) {
+        warning("Skipping reduction '", reduction_name,
+                "' because its cell names do not match the exported cells.")
+        next
+      }
+      embeddings = embeddings[cells, , drop = FALSE]
+      obsm_key = if (startsWith(reduction_name, "X_")) {
+        reduction_name
+      } else {
+        paste0("X_", reduction_name)
+      }
+      py_set_obsm(adata, obsm_key, unname(embeddings))
+    }
+    invisible(NULL)
+  }
 
   # --- Spatial data migration ---
   image_names = Seurat::Images(seurat_object)
 
   if (length(image_names) == 0) {
     warning("No spatial images found in Seurat object. Writing non-spatial H5AD.")
-    adata = anndata$AnnData(X = counts_matrix, obs = pd$DataFrame(meta_data))
-    adata$var_names = np$array(gene_names)
-    if (length(seurat_object@reductions) > 0) {
-      for (reduction_name in names(seurat_object@reductions)) {
-        embeddings = Embeddings(seurat_object, reduction = reduction_name)
-        py_set_obsm(adata, paste0("X_", reduction_name), embeddings)
-      }
-    }
+    adata = create_anndata(counts_matrix, meta_data, cell_names)
+    write_reductions(adata, cell_names)
     adata$write_h5ad(output_path)
     message("Saved (non-spatial) at ", output_path)
     return(invisible(NULL))
@@ -233,7 +273,15 @@ def _gauguin_set_obsm(adata, key, value):
   } else if (is(image_obj, "VisiumV2")) {
     # VisiumV2: inherits FOV; GetTissueCoordinates returns columns (x, y, cell)
     centroids = SeuratObject::GetTissueCoordinates(image_obj)
-    spatial_coords = as.matrix(centroids[, c(1, 2)])
+    if (all(c("x", "y") %in% colnames(centroids))) {
+      spatial_coords = as.matrix(centroids[, c("x", "y")])
+    } else {
+      spatial_coords = as.matrix(centroids[, c(1, 2)])
+    }
+    cell_column = intersect(c("cell", "barcode"), colnames(centroids))
+    if (length(cell_column) > 0) {
+      rownames(spatial_coords) = as.character(centroids[[cell_column[1]]])
+    }
 
     # Image (lowres) and scale factors from VisiumV2 slots
     lowres_img_array = tryCatch(slot(image_obj, "image"), error = function(e) NULL)
@@ -250,7 +298,15 @@ def _gauguin_set_obsm(adata, key, value):
   } else if (is(image_obj, "FOV")) {
     # Generic FOV (Xenium, Vizgen, etc.): centroids from GetTissueCoordinates
     centroids = SeuratObject::GetTissueCoordinates(image_obj)
-    spatial_coords = as.matrix(centroids[, c(1, 2)])
+    if (all(c("x", "y") %in% colnames(centroids))) {
+      spatial_coords = as.matrix(centroids[, c("x", "y")])
+    } else {
+      spatial_coords = as.matrix(centroids[, c(1, 2)])
+    }
+    cell_column = intersect(c("cell", "barcode"), colnames(centroids))
+    if (length(cell_column) > 0) {
+      rownames(spatial_coords) = as.character(centroids[[cell_column[1]]])
+    }
 
   } else if (is(image_obj, "SlideSeq")) {
     coords_df = slot(image_obj, "coordinates")
@@ -260,16 +316,38 @@ def _gauguin_set_obsm(adata, key, value):
   if (is.null(spatial_coords)) {
     warning("Could not extract spatial coordinates from image object of class '",
             class(image_obj)[1], "'. Writing non-spatial H5AD.")
-    adata = anndata$AnnData(X = counts_matrix, obs = pd$DataFrame(meta_data))
-    adata$var_names = np$array(gene_names)
+    adata = create_anndata(counts_matrix, meta_data, cell_names)
+    write_reductions(adata, cell_names)
     adata$write_h5ad(output_path)
     message("Saved (non-spatial) at ", output_path)
     return(invisible(NULL))
   }
 
+  if (!is.null(sf_list)) {
+    valid_scale = vapply(
+      sf_list,
+      function(value) {
+        is.numeric(value) && length(value) == 1 &&
+          is.finite(value) && value > 0
+      },
+      logical(1)
+    )
+    if (any(!valid_scale)) {
+      warning(
+        "Omitting invalid spatial scale factors: ",
+        paste(names(sf_list)[!valid_scale], collapse = ", ")
+      )
+      sf_list = sf_list[valid_scale]
+    }
+    if (length(sf_list) == 0) sf_list = NULL
+  }
+
   # Name the index-aligned obs vectors with the same row order as spatial_coords
   # so we can subset everything together when cells don't fully overlap.
   coord_rownames = rownames(spatial_coords)
+  if (!is.null(coord_rownames) && anyDuplicated(coord_rownames)) {
+    stop("Spatial coordinate cell barcodes must be unique.")
+  }
   name_vec = function(v) {
     if (!is.null(v) && !is.null(coord_rownames) && length(v) == length(coord_rownames)) {
       names(v) = coord_rownames
@@ -281,10 +359,15 @@ def _gauguin_set_obsm(adata, key, value):
   array_col  = name_vec(array_col)
 
   # Ensure coordinates align with cells in the counts matrix
-  common_cells = intersect(coord_rownames, cell_names)
+  common_cells = cell_names[cell_names %in% coord_rownames]
   if (length(common_cells) == 0) {
-    # Try without rowname matching (positional)
-    if (nrow(spatial_coords) == length(cell_names)) {
+    # Positional matching is only safe when coordinates have no meaningful
+    # row names. Never relabel an equally sized but conflicting barcode set.
+    default_coord_names = is.null(coord_rownames) || identical(
+      coord_rownames,
+      as.character(seq_len(nrow(spatial_coords)))
+    )
+    if (default_coord_names && nrow(spatial_coords) == length(cell_names)) {
       rownames(spatial_coords) = cell_names
       coord_rownames = cell_names
       if (!is.null(tissue_vec)) names(tissue_vec) = cell_names
@@ -293,8 +376,8 @@ def _gauguin_set_obsm(adata, key, value):
       common_cells = cell_names
     } else {
       warning("Spatial coordinates do not match cell barcodes. Skipping spatial data.")
-      adata = anndata$AnnData(X = counts_matrix, obs = pd$DataFrame(meta_data))
-      adata$var_names = np$array(gene_names)
+      adata = create_anndata(counts_matrix, meta_data, cell_names)
+      write_reductions(adata, cell_names)
       adata$write_h5ad(output_path)
       message("Saved (non-spatial) at ", output_path)
       return(invisible(NULL))
@@ -329,18 +412,15 @@ def _gauguin_set_obsm(adata, key, value):
   if (!is.null(array_col) && !("array_col" %in% colnames(meta_data))) {
     meta_data[["array_col"]] = as.integer(array_col)
   }
+  if (!("library_id" %in% colnames(meta_data))) {
+    meta_data[["library_id"]] = library_id
+  }
 
   # Create AnnData now that meta_data is final
-  adata = anndata$AnnData(X = counts_matrix, obs = pd$DataFrame(meta_data))
-  adata$var_names = np$array(gene_names)
+  adata = create_anndata(counts_matrix, meta_data, cell_names)
 
   # --- Dimensional reductions ---
-  if (length(seurat_object@reductions) > 0) {
-    for (reduction_name in names(seurat_object@reductions)) {
-      embeddings = Embeddings(seurat_object, reduction = reduction_name)
-      py_set_obsm(adata, paste0("X_", reduction_name), embeddings)
-    }
-  }
+  write_reductions(adata, cell_names)
 
   # Decide which image resolutions to include.
   # Priority for hires: external file (hires_image_path) > in-object @image
@@ -383,7 +463,10 @@ def _gauguin_set_obsm(adata, key, value):
     library_id   = library_id,
     hires_img    = hires_arg,
     lowres_img   = lowres_arg,
-    scalefactors = sf_list
+    scalefactors = sf_list,
+    source_image_path = if (is.null(hires_image_path)) "" else normalizePath(
+      hires_image_path, winslash = "/", mustWork = TRUE
+    )
   )
   message("  Written obsm['spatial'] and uns['spatial'][", library_id, "]")
 

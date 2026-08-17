@@ -31,11 +31,13 @@ ReadH5AD = function(h5ad_path, env_path) {
   var_names = as.character(py_to_r(adata$var_names$to_list()))
   builtins <- import_builtins()
   layers_list <- as.character(py_to_r(builtins$list(adata$layers$keys())))
+  raw_data <- py_to_r(adata$raw)
+  has_raw <- !is.null(raw_data)
 
   if ("counts" %in% layers_list) {
     message("Using counts layer...")
     counts_mtx = adata$layers["counts"]
-  } else if (!py_is_null_xptr(adata$raw)) {
+  } else if (has_raw) {
     message("Using adata.raw.X...")
     counts_mtx = adata$raw$X
     var_names = as.character(py_to_r(adata$raw$var_names$to_list()))
@@ -109,36 +111,70 @@ ReadH5AD = function(h5ad_path, env_path) {
     message("No scaled.data be yieled in anndata object,nor any scaled matrix be generated")
   }
 
-  obsm_dict = py_call(adata$obsm$as_dict)
+  # Convert the aligned mapping directly; `as_dict()` is deprecated in
+  # anndata and scheduled for removal.
+  obsm_keys = as.character(py_to_r(builtins$list(adata$obsm$keys())))
+  obsm_dict = setNames(
+    lapply(obsm_keys, function(key) py_to_r(adata$obsm[[key]])),
+    obsm_keys
+  )
 
   for (key in names(obsm_dict)) {
     if (key == "spatial") next
-    embedding = obsm_dict[[key]]
-    embedding = py_to_r(embedding)
+    # AnnData permits either ndarray or pandas.DataFrame values in obsm.
+    # Seurat's DimReduc slot requires a numeric matrix.
+    embedding = as.matrix(obsm_dict[[key]])
+    if (!is.numeric(embedding)) {
+      warning("Skipping non-numeric obsm['", key, "']")
+      next
+    }
+    if (nrow(embedding) != ncol(seurat_obj)) {
+      warning(
+        "Skipping obsm['", key, "']: expected ", ncol(seurat_obj),
+        " rows but found ", nrow(embedding)
+      )
+      next
+    }
     rownames(embedding) = colnames(seurat_obj)
-    colnames(embedding) = paste0(key, "_", 1:ncol(embedding))
-    fixed_key = gsub("^X_", "", key)
-    fixed_key = paste0(fixed_key, "")
-    seurat_obj[[fixed_key]] = CreateDimReducObject(embeddings = embedding,
-                                                    key = fixed_key, assay = "RNA")
+    reduction_name = gsub("^X_", "", key)
+    reduction_key_base = gsub("[^[:alnum:]]", "", reduction_name)
+    if (!nzchar(reduction_key_base)) {
+      reduction_key_base = "DR"
+    }
+    reduction_key = paste0(reduction_key_base, "_")
+    colnames(embedding) = paste0(reduction_key, 1:ncol(embedding))
+    seurat_obj[[reduction_name]] = CreateDimReducObject(
+      embeddings = embedding,
+      key = reduction_key,
+      assay = "RNA"
+    )
   }
 
   # --- Spatial data migration ---
   has_spatial_obsm = "spatial" %in% names(obsm_dict)
-  uns_dict = tryCatch(py_to_r(py_call(adata$uns$as_dict)), error = function(e) list())
+  # AnnData stores `uns` as a regular Python dict. Unlike `obsm`, it does not
+  # provide an `as_dict()` method in current anndata releases.
+  uns_dict = tryCatch(
+    py_to_r(adata$uns),
+    error = function(e) {
+      warning("Failed to read adata.uns: ", conditionMessage(e))
+      list()
+    }
+  )
   has_spatial_uns = "spatial" %in% names(uns_dict)
 
   if (has_spatial_obsm) {
     message("Detected spatial data in obsm['spatial'], migrating...")
 
-    spatial_coords = py_to_r(obsm_dict[["spatial"]])
+    spatial_coords = obsm_dict[["spatial"]]
     rownames(spatial_coords) = obs_names
 
     # Build coordinates data.frame
-    # AnnData spatial coords: column 1 = imagerow (pxl_row), column 2 = imagecol (pxl_col)
+    # AnnData/Scanpy spatial coords are (x, y), corresponding to Seurat's
+    # (imagecol, imagerow), respectively.
     coordinates = data.frame(
-      imagerow = spatial_coords[, 1],
-      imagecol = spatial_coords[, 2],
+      imagerow = spatial_coords[, 2],
+      imagecol = spatial_coords[, 1],
       row.names = obs_names
     )
 
@@ -169,6 +205,7 @@ ReadH5AD = function(h5ad_path, env_path) {
     sf_fiducial = 1
     sf_hires = 1
     sf_lowres = 1
+    image_scale = "lowres"
 
     if (has_spatial_uns) {
       spatial_uns = uns_dict[["spatial"]]
@@ -180,12 +217,16 @@ ReadH5AD = function(h5ad_path, env_path) {
         # Extract images
         if ("images" %in% names(lib_data)) {
           images_data = lib_data[["images"]]
-          if ("hires" %in% names(images_data)) {
-            spatial_image = images_data[["hires"]]
-            message("  Loaded hires image from uns['spatial']")
-          } else if ("lowres" %in% names(images_data)) {
+          # A VisiumV1 object stores one raster. Prefer lowres because it is
+          # also SpatialDimPlot's default image.scale.
+          if ("lowres" %in% names(images_data)) {
             spatial_image = images_data[["lowres"]]
+            image_scale = "lowres"
             message("  Loaded lowres image from uns['spatial']")
+          } else if ("hires" %in% names(images_data)) {
+            spatial_image = images_data[["hires"]]
+            image_scale = "hires"
+            message("  Loaded hires image from uns['spatial']")
           }
           # Ensure image is a 3D array
           if (!is.array(spatial_image)) {
@@ -222,8 +263,15 @@ ReadH5AD = function(h5ad_path, env_path) {
       key = "slice1_",
       image = spatial_image,
       scale.factors = scale_factors,
-      coordinates = coordinates,
-      spot.radius = sf_spot / 2
+      coordinates = coordinates
+    )
+
+    # VisiumV1@spot.radius is a dimensionless image-relative diameter, not a
+    # full-resolution pixel radius. Let Seurat combine spot size, scale factor,
+    # and raster dimensions using the same resolution selected above.
+    slot(visium_image, "spot.radius") = Seurat::Radius(
+      visium_image,
+      scale = image_scale
     )
 
     # Attach image to Seurat object
